@@ -36,11 +36,12 @@ use primitives::storage::well_known_keys;
 use codec::{Encode, Decode};
 use state_machine::{
 	Backend as StateBackend, CodeExecutor,
-	ExecutionStrategy, ExecutionManager, ChangesTrieAnchorBlockId,
-	prove_read, key_changes, key_changes_proof, OverlayedChanges
+	ExecutionStrategy, ExecutionManager, prove_read,
+	key_changes, key_changes_proof,
+	ChangesTrieAnchorBlockId, OverlayedChanges
 };
 
-use backend::{self, BlockImportOperation};
+use backend::{self, BlockImportOperation, PrunableStateChangesTrieStorage};
 use blockchain::{self, Info as ChainInfo, Backend as ChainBackend, HeaderBackend as ChainHeaderBackend};
 use call_executor::{CallExecutor, LocalCallExecutor};
 use executor::{RuntimeVersion, RuntimeInfo};
@@ -336,33 +337,56 @@ impl<B, E, Block> Client<B, E, Block> where
 		Ok((header, proof))
 	}
 
-	/// Get pairs of (block, extrinsic) where key has been changed at given blocks range.
-	/// Works only for runtimes that are supporting changes tries.
-	pub fn key_changes(
+	/// Get longest range within [first; last] that is possible to use in `key_changes`
+	/// and `key_changes_proof` calls.
+	/// Range could be shortened from the beginning if some changes tries have been pruned.
+	/// Returns None if changes trues are not supported.
+	pub fn max_key_changes_range(
 		&self,
-		first: Block::Hash,
-		last: Block::Hash,
-		key: &[u8]
-	) -> error::Result<Vec<(NumberFor<Block>, u32)>> {
-		let config = self.changes_trie_config.as_ref();
-		let storage = self.backend.changes_trie_storage();
-		let (config, storage) = match (config, storage) {
-			(Some(config), Some(storage)) => (config, storage),
-			_ => return Err(error::ErrorKind::ChangesTriesNotSupported.into()),
+		first: NumberFor<Block>,
+		last: BlockId<Block>,
+	) -> error::Result<Option<(NumberFor<Block>, BlockId<Block>)>> {
+		let (config, storage) = match self.require_changes_trie().ok() {
+			Some((config, storage)) => (config, storage),
+			None => return Ok(None),
 		};
 
-		key_changes::<_, Blake2Hasher>(
+		let first = first.as_();
+		let last_num = self.require_block_number_from_id(&last)?.as_();
+		if first > last_num {
+			return Err(error::ErrorKind::ChangesTrieAccessFailed("Invalid changes trie range".into()).into());
+		}
+
+		let finalized_number = self.backend.blockchain().info()?.finalized_number;
+		let oldest = storage.oldest_changes_trie_block(config, finalized_number.as_());
+		let first = As::sa(::std::cmp::max(first, oldest));
+		Ok(Some((first, last)))
+	}
+
+	/// Get pairs of (block, extrinsic) where key has been changed at given blocks range.
+	/// Works only for runtimes that are supporting changes tries.
+	/// Changes are returned in descending order.
+	pub fn key_changes(
+		&self,
+		first: NumberFor<Block>,
+		last: BlockId<Block>,
+		key: &StorageKey,
+	) -> error::Result<Vec<(NumberFor<Block>, u32)>> {
+		let (config, storage) = self.require_changes_trie()?;
+		let last_number = self.require_block_number_from_id(&last)?.as_();
+		let last_hash = self.require_block_hash_from_id(&last)?;
+		key_changes(
 			config,
-			storage,
-			self.require_block_number_from_id(&BlockId::Hash(first))?.as_(),
+			&*storage,
+			first.as_(),
 			&ChangesTrieAnchorBlockId {
-				hash: convert_hash(&last),
-				number: self.require_block_number_from_id(&BlockId::Hash(last))?.as_(),
+				hash: convert_hash(&last_hash),
+				number: last_number,
 			},
 			self.backend.blockchain().info()?.best_number.as_(),
-			key)
+			&key.0)
+		.and_then(|r| r.map(|r| r.map(|(block, tx)| (As::sa(block), tx))).collect::<Result<_, _>>())
 		.map_err(|err| error::ErrorKind::ChangesTrieAccessFailed(err).into())
-		.map(|r| r.into_iter().map(|(b, e)| (As::sa(b), e)).collect())
 	}
 
 	/// Get proof for computation of (block, extrinsic) pairs where key has been changed at given blocks range.
@@ -374,31 +398,35 @@ impl<B, E, Block> Client<B, E, Block> where
 		first: Block::Hash,
 		last: Block::Hash,
 		max: Block::Hash,
-		key: &[u8]
+		key: &StorageKey,
 	) -> error::Result<(NumberFor<Block>, Vec<Vec<u8>>)> {
-		let config = self.changes_trie_config.as_ref();
-		let storage = self.backend.changes_trie_storage();
-		let (config, storage) = match (config, storage) {
-			(Some(config), Some(storage)) => (config, storage),
-			_ => return Err(error::ErrorKind::ChangesTriesNotSupported.into()),
-		};
-
+		let (config, storage) = self.require_changes_trie()?;
 		let max_number = ::std::cmp::min(
 			self.backend.blockchain().info()?.best_number,
 			self.require_block_number_from_id(&BlockId::Hash(max))?,
 		);
-		key_changes_proof::<_, Blake2Hasher>(
+		key_changes_proof(
 			config,
-			storage,
+			&*storage,
 			self.require_block_number_from_id(&BlockId::Hash(first))?.as_(),
 			&ChangesTrieAnchorBlockId {
 				hash: convert_hash(&last),
 				number: self.require_block_number_from_id(&BlockId::Hash(last))?.as_(),
 			},
 			max_number.as_(),
-			key)
+			&key.0)
 		.map_err(|err| error::ErrorKind::ChangesTrieAccessFailed(err).into())
 		.map(|proof| (max_number, proof))
+	}
+
+	/// Returns changes trie configuration and storage or an error if it is not supported.
+	fn require_changes_trie(&self) -> error::Result<(&ChangesTrieConfiguration, &B::ChangesTrieStorage)> {
+		let config = self.changes_trie_config.as_ref();
+		let storage = self.backend.changes_trie_storage();
+		match (config, storage) {
+			(Some(config), Some(storage)) => Ok((config, storage)),
+			_ => Err(error::ErrorKind::ChangesTriesNotSupported.into()),
+		}
 	}
 
 	/// Create a new block, built on the head of the chain.
@@ -750,7 +778,13 @@ impl<B, E, Block> Client<B, E, Block> where
 		}
 	}
 
-	/// Convert an arbitrary block ID into a block hash.
+	/// Convert an arbitrary block ID into a block number, returning error if the block is unknown.
+	fn require_block_hash_from_id(&self, id: &BlockId<Block>) -> error::Result<Block::Hash> {
+		self.block_hash_from_id(id)
+			.and_then(|n| n.ok_or_else(|| error::ErrorKind::UnknownBlock(format!("{}", id)).into()))
+	}
+
+	/// Convert an arbitrary block ID into a block number.
 	pub fn block_number_from_id(&self, id: &BlockId<Block>) -> error::Result<Option<NumberFor<Block>>> {
 		match *id {
 			BlockId::Hash(_) => Ok(self.header(id)?.map(|h| h.number().clone())),
@@ -1586,9 +1620,7 @@ pub(crate) mod tests {
 		let (client, _, test_cases) = prepare_client_with_key_changes();
 
 		for (index, (begin, end, key, expected_result)) in test_cases.into_iter().enumerate() {
-			let begin = client.block_hash(begin).unwrap().unwrap();
-			let end = client.block_hash(end).unwrap().unwrap();
-			let actual_result = client.key_changes(begin, end, &key).unwrap();
+			let actual_result = client.key_changes(begin, BlockId::Number(end), &StorageKey(key)).unwrap();
 			match actual_result == expected_result {
 				true => (),
 				false => panic!(format!("Failed test {}: actual = {:?}, expected = {:?}",

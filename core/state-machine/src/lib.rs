@@ -61,7 +61,8 @@ pub use changes_trie::{
 	RootsStorage as ChangesTrieRootsStorage,
 	InMemoryStorage as InMemoryChangesTrieStorage,
 	key_changes, key_changes_proof, key_changes_proof_check,
-	prune as prune_changes_tries};
+	prune as prune_changes_tries,
+	oldest_non_pruned_trie as oldest_non_pruned_changes_trie};
 pub use overlayed_changes::OverlayedChanges;
 pub use trie_backend_essence::Storage;
 pub use trie_backend::TrieBackend;

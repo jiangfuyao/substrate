@@ -275,7 +275,7 @@ pub mod tests {
 	use light::fetcher::{Fetcher, FetchChecker, LightDataChecker,
 		RemoteCallRequest, RemoteHeaderRequest};
 	use primitives::{Blake2Hasher};
-	use primitives::storage::well_known_keys;
+	use primitives::storage::{StorageKey, well_known_keys};
 	use runtime_primitives::generic::BlockId;
 	use state_machine::Backend;
 	use super::*;
@@ -419,6 +419,7 @@ pub mod tests {
 			let end_hash = remote_client.block_hash(end).unwrap().unwrap();
 
 			// 'fetch' changes proof from remote node
+			let key = StorageKey(key);
 			let (remote_max, remote_proof) = remote_client.key_changes_proof(
 				begin_hash, end_hash, max_hash, &key
 			).unwrap();
@@ -431,7 +432,7 @@ pub mod tests {
 				last_block: (end, end_hash),
 				max_block: (max, max_hash),
 				tries_roots: local_roots_range,
-				key: key,
+				key: key.0,
 				retry_count: None,
 			};
 			let local_result = local_checker.check_changes_proof(
@@ -460,6 +461,7 @@ pub mod tests {
 		let end_hash = remote_client.block_hash(end).unwrap().unwrap();
 
 		// 'fetch' changes proof from remote node
+		let key = StorageKey(key);
 		let (remote_max, mut remote_proof) = remote_client.key_changes_proof(
 			begin_hash, end_hash, max_hash, &key).unwrap();
 		let local_roots_range = local_roots.clone()[(begin - 1) as usize..].to_vec();
@@ -469,7 +471,7 @@ pub mod tests {
 			last_block: (end, end_hash),
 			max_block: (max, max_hash),
 			tries_roots: local_roots_range.clone(),
-			key: key,
+			key: key.0,
 			retry_count: None,
 		};
 

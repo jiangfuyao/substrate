@@ -23,7 +23,7 @@ use runtime_primitives::traits::{Block as BlockT, Header as HeaderT, NumberFor};
 use runtime_primitives::generic::{BlockId};
 use consensus::{ImportBlock, ImportResult};
 use runtime_primitives::Justification;
-use primitives::{H256, Blake2Hasher, AuthorityId};
+use primitives::{H256, Blake2Hasher, AuthorityId, storage::StorageKey};
 
 /// Local client abstraction for the network.
 pub trait Client<Block: BlockT>: Send + Sync {
@@ -64,7 +64,7 @@ pub trait Client<Block: BlockT>: Send + Sync {
 		first: Block::Hash,
 		last: Block::Hash,
 		max: Block::Hash,
-		key: &[u8]
+		key: &StorageKey,
 	) -> Result<(NumberFor<Block>, Vec<Vec<u8>>), Error>;
 }
 
@@ -121,7 +121,7 @@ impl<B, E, Block> Client<Block> for SubstrateClient<B, E, Block> where
 		first: Block::Hash,
 		last: Block::Hash,
 		max: Block::Hash,
-		key: &[u8]
+		key: &StorageKey
 	) -> Result<(NumberFor<Block>, Vec<Vec<u8>>), Error> {
 		(self as &SubstrateClient<B, E, Block>).key_changes_proof(first, last, max, key)
 	}
